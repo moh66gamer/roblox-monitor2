@@ -5,6 +5,9 @@
   "scripts": {
     "start": "node monitor.js"
   },
+  "dependencies": {
+    "mongodb": "^6.3.0"
+  },
   "engines": {
     "node": "20.x"
   }
