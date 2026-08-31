@@ -2,12 +2,14 @@ const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
+const { MongoClient } = require('mongodb');
 
 // قراءة الأيديهات وفصلها بفاصلة لتدعم أكثر من لاعب
 const USER_IDS_ENV = process.env.USER_ID || '9511971040';
 const USER_IDS = USER_IDS_ENV.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
 
 const COOKIE = process.env.ROBLOX_COOKIE || process.env.ROBLOSECURITY;
+const MONGODB_URI = process.env.MONGODB_URI;
 const DB_FILE = process.env.DB_PATH || "/data/data.json";
 const PORT = process.env.PORT || 3000;
 
@@ -16,40 +18,63 @@ if (!COOKIE) {
     process.exit(1);
 }
 
+let dbClient = null;
+let dbCollection = null;
+let localDb = {};
 let csrfToken = '';
-let usernameCache = {}; // لتخزين أسماء اللاعبين لعدم طلبها مراراً
+let usernameCache = {};
 
-// تحميل البيانات لكل لاعب
-function loadData() {
-    try {
-        if (fs.existsSync(DB_FILE)) {
-            return JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+// الاتصال بقاعدة بيانات MongoDB إن وجدت
+async function initDb() {
+    if (MONGODB_URI) {
+        try {
+            dbClient = new MongoClient(MONGODB_URI);
+            await dbClient.connect();
+            const db = dbClient.db('roblox_monitor');
+            dbCollection = db.collection('user_sessions');
+            console.log("[✓] تم الاتصال بقاعدة بيانات MongoDB Atlas بنجاح!");
+        } catch (e) {
+            console.error("[!] فشل الاتصال بـ MongoDB، سيتم استخدام التخزين المحلي الاحتياطي:", e.message);
         }
-    } catch (e) {
-        console.error("خطأ في قراءة ملف البيانات:", e);
+    } else {
+        console.log("[i] لم يتم تحديد MONGODB_URI، يتم استخدام التخزين المحلي.");
     }
-    return {};
 }
 
-let db = loadData();
-
-// تهيئة قاعدة البيانات لجميع اللاعبين المطلوبين
-USER_IDS.forEach(id => {
-    if (!db[id]) {
-        db[id] = { currentSession: null, history: [] };
+async function getUserData(userId) {
+    if (dbCollection) {
+        try {
+            const doc = await dbCollection.findOne({ _id: userId });
+            if (doc) return { currentSession: doc.currentSession, history: doc.history || [] };
+        } catch (e) {
+            console.error(`خطأ في قراءة بيانات ${userId} من MongoDB:`, e.message);
+        }
     }
-});
+    if (!localDb[userId]) {
+        localDb[userId] = { currentSession: null, history: [] };
+    }
+    return localDb[userId];
+}
 
-function saveData() {
+async function saveUserData(userId, data) {
+    if (dbCollection) {
+        try {
+            await dbCollection.updateOne(
+                { _id: userId },
+                { $set: { currentSession: data.currentSession, history: data.history } },
+                { upsert: true }
+            );
+            return;
+        } catch (e) {
+            console.error(`خطأ في حفظ بيانات ${userId} في MongoDB:`, e.message);
+        }
+    }
+    localDb[userId] = data;
     try {
         const dir = path.dirname(DB_FILE);
-        if (!fs.existsSync(dir)) {
-            fs.mkdirSync(dir, { recursive: true });
-        }
-        fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf8');
-    } catch (e) {
-        console.error("خطأ في حفظ البيانات:", e);
-    }
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(DB_FILE, JSON.stringify(localDb, null, 2), 'utf8');
+    } catch (e) {}
 }
 
 // دالة الطلبات لروبلوكس
@@ -99,7 +124,6 @@ function robloxRequest(method, urlString, bodyData = null, isRetry = false) {
     });
 }
 
-// جلب اسم اللعبة
 async function fetchGameName(universeId) {
     if (!universeId) return "لعبة غير معروفة";
     try {
@@ -109,7 +133,6 @@ async function fetchGameName(universeId) {
     return `Universe ${universeId}`;
 }
 
-// جلب اسم اللاعب
 async function fetchUsername(userId) {
     if (usernameCache[userId]) return usernameCache[userId];
     try {
@@ -122,11 +145,9 @@ async function fetchUsername(userId) {
     return `User ${userId}`;
 }
 
-// فحص حضور جميع اللاعبين
 async function checkPresence() {
     if (USER_IDS.length === 0) return;
     try {
-        // تهيئة أسماء اللاعبين أولاً إذا لم تكن موجودة
         for (const id of USER_IDS) await fetchUsername(id);
 
         const res = await robloxRequest('POST', 'https://presence.roblox.com/v1/presence/users', {
@@ -141,24 +162,24 @@ async function checkPresence() {
             const placeId = presence.placeId;
             const universeId = presence.universeId;
 
-            if (!db[userId]) db[userId] = { currentSession: null, history: [] };
+            const userData = await getUserData(userId);
 
             if (type === 2 && placeId) {
-                if (!db[userId].currentSession || db[userId].currentSession.placeId !== placeId) {
-                    if (db[userId].currentSession) closeSession(userId);
+                if (!userData.currentSession || userData.currentSession.placeId !== placeId) {
+                    if (userData.currentSession) await closeSession(userId, userData);
                     
                     const gameName = await fetchGameName(universeId);
-                    db[userId].currentSession = {
+                    userData.currentSession = {
                         placeId: placeId,
                         universeId: universeId,
                         gameName: gameName,
                         startTime: new Date().toISOString()
                     };
-                    saveData();
+                    await saveUserData(userId, userData);
                     console.log(`[→] اللاعب ${usernameCache[userId]} دخل إلى: ${gameName}`);
                 }
             } else {
-                if (db[userId].currentSession) closeSession(userId);
+                if (userData.currentSession) await closeSession(userId, userData);
             }
         }
     } catch (e) {
@@ -166,9 +187,8 @@ async function checkPresence() {
     }
 }
 
-// إنهاء الجلسة وحساب المدة
-function closeSession(userId) {
-    const session = db[userId].currentSession;
+async function closeSession(userId, userData) {
+    const session = userData.currentSession;
     if (!session) return;
     const endTime = new Date();
     const startTime = new Date(session.startTime);
@@ -179,35 +199,34 @@ function closeSession(userId) {
     const seconds = totalSeconds % 60;
     const durationFormatted = `${minutes} دقيقة و ${seconds} ثانية`;
 
-    db[userId].history.unshift({
+    userData.history.unshift({
         gameName: session.gameName,
         startTime: session.startTime,
         endTime: endTime.toISOString(),
         duration: durationFormatted
     });
 
-    // الاحتفاظ بآخر 50 جلسة لكل لاعب لتجنب تضخم الملف
-    if (db[userId].history.length > 50) db[userId].history.pop();
+    if (userData.history.length > 50) userData.history.pop();
 
     console.log(`[✓] اللاعب ${usernameCache[userId]} خرج من: ${session.gameName} | المدة: ${durationFormatted}`);
-    db[userId].currentSession = null;
-    saveData();
+    userData.currentSession = null;
+    await saveUserData(userId, userData);
 }
 
 // خادم الويب
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     
     let currentHtml = '';
     let historyRows = '';
 
-    USER_IDS.forEach(userId => {
+    for (const userId of USER_IDS) {
         const username = usernameCache[userId] || `User ${userId}`;
-        const userDb = db[userId];
+        const userData = await getUserData(userId);
 
-        if (userDb && userDb.currentSession) {
+        if (userData && userData.currentSession) {
             currentHtml += `<div style="background:#d4edda;padding:10px;border-radius:5px;margin-bottom:10px;border-right: 4px solid #28a745;">
-                <strong>${username}:</strong> يلعب الآن <b>${userDb.currentSession.gameName}</b> (دخل: ${new Date(userDb.currentSession.startTime).toLocaleString()})
+                <strong>${username}:</strong> يلعب الآن <b>${userData.currentSession.gameName}</b> (دخل: ${new Date(userData.currentSession.startTime).toLocaleString()})
             </div>`;
         } else {
             currentHtml += `<div style="background:#f8d7da;padding:10px;border-radius:5px;margin-bottom:10px;border-right: 4px solid #dc3545;">
@@ -215,8 +234,8 @@ const server = http.createServer((req, res) => {
             </div>`;
         }
 
-        if (userDb && userDb.history) {
-            userDb.history.forEach(item => {
+        if (userData && userData.history) {
+            userData.history.forEach(item => {
                 historyRows += `<tr>
                     <td>${username}</td>
                     <td>${item.gameName}</td>
@@ -225,7 +244,7 @@ const server = http.createServer((req, res) => {
                 </tr>`;
             });
         }
-    });
+    }
 
     if (historyRows === '') {
         historyRows = '<tr><td colspan="4" style="text-align:center;">لا توجد جلسات مسجلة بعد</td></tr>';
@@ -272,9 +291,13 @@ const server = http.createServer((req, res) => {
     res.end(html);
 });
 
-server.listen(PORT, () => {
-    console.log(`خادم الويب يعمل على المنفذ ${PORT}`);
-});
+async function start() {
+    await initDb();
+    server.listen(PORT, () => {
+        console.log(`خادم الويب يعمل على المنفذ ${PORT}`);
+    });
+    checkPresence();
+    setInterval(checkPresence, 30000);
+}
 
-checkPresence();
-setInterval(checkPresence, 30000);
+start();
