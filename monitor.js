@@ -5,7 +5,7 @@ const path = require('path');
 const { MongoClient } = require('mongodb');
 
 // قراءة الأيديهات وفصلها بفاصلة لتدعم أكثر من لاعب
-const USER_IDS_ENV = process.env.USER_ID || '9511971040';
+const USER_IDS_ENV = process.env.USER_ID || '1843923756';
 const USER_IDS = USER_IDS_ENV.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
 
 const COOKIE = process.env.ROBLOX_COOKIE || process.env.ROBLOSECURITY;
@@ -77,7 +77,7 @@ async function saveUserData(userId, data) {
     } catch (e) {}
 }
 
-// دالة الطلبات لروبلوكس
+// دالة الطلبات لروبلوكس (نفس منطق المتصفح المعتمد على الكوكي)
 function robloxRequest(method, urlString, bodyData = null, isRetry = false) {
     return new Promise((resolve, reject) => {
         const url = new URL(urlString);
@@ -87,7 +87,9 @@ function robloxRequest(method, urlString, bodyData = null, isRetry = false) {
             method: method,
             headers: {
                 'Cookie': `.ROBLOSECURITY=${COOKIE}`,
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+                'Accept': 'application/json',
+                'Referer': 'https://www.roblox.com/'
             }
         };
 
@@ -113,7 +115,7 @@ function robloxRequest(method, urlString, bodyData = null, isRetry = false) {
                 if (res.statusCode >= 200 && res.statusCode < 300) {
                     try { resolve(JSON.parse(data)); } catch (e) { resolve(data); }
                 } else {
-                    reject(new Error(`HTTP Error ${res.statusCode}`));
+                    reject(new Error(`HTTP Error ${res.statusCode}` ));
                 }
             });
         });
@@ -145,6 +147,7 @@ async function fetchUsername(userId) {
     return `User ${userId}`;
 }
 
+// الفحص المعتمد على الـ API الخاص بـ Presence
 async function checkPresence() {
     if (USER_IDS.length === 0) return;
     try {
@@ -158,17 +161,20 @@ async function checkPresence() {
 
         for (const presence of res.userPresences) {
             const userId = presence.userId;
-            const type = presence.userPresenceType; 
+            const type = presence.userPresenceType; // 0=Off, 1=Online, 2=InGame, 3=Studio
             const placeId = presence.placeId;
             const universeId = presence.universeId;
+            const lastLocation = presence.lastLocation;
 
             const userData = await getUserData(userId);
+            const username = usernameCache[userId] || `User ${userId}`;
 
             if (type === 2 && placeId) {
+                // إذا كان في لعبة
                 if (!userData.currentSession || userData.currentSession.placeId !== placeId) {
                     if (userData.currentSession) await closeSession(userId, userData);
                     
-                    const gameName = await fetchGameName(universeId);
+                    const gameName = lastLocation || await fetchGameName(universeId);
                     userData.currentSession = {
                         placeId: placeId,
                         universeId: universeId,
@@ -176,9 +182,10 @@ async function checkPresence() {
                         startTime: new Date().toISOString()
                     };
                     await saveUserData(userId, userData);
-                    console.log(`[→] اللاعب ${usernameCache[userId]} دخل إلى: ${gameName}`);
+                    console.log(`[→] اللاعب ${username} دخل إلى: ${gameName}`);
                 }
             } else {
+                // إذا لم يكن في لعبة (Offline أو Online في القائمة الرئيسية)
                 if (userData.currentSession) await closeSession(userId, userData);
             }
         }
@@ -190,6 +197,7 @@ async function checkPresence() {
 async function closeSession(userId, userData) {
     const session = userData.currentSession;
     if (!session) return;
+    const username = usernameCache[userId] || `User ${userId}`;
     const endTime = new Date();
     const startTime = new Date(session.startTime);
     const diffMs = endTime - startTime;
@@ -208,12 +216,12 @@ async function closeSession(userId, userData) {
 
     if (userData.history.length > 50) userData.history.pop();
 
-    console.log(`[✓] اللاعب ${usernameCache[userId]} خرج من: ${session.gameName} | المدة: ${durationFormatted}`);
+    console.log(`[✓] اللاعب ${username} خرج من: ${session.gameName} | المدة: ${durationFormatted}`);
     userData.currentSession = null;
     await saveUserData(userId, userData);
 }
 
-// خادم الويب
+// خادم الويب لعرض اللوحة
 const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     
@@ -268,7 +276,7 @@ const server = http.createServer(async (req, res) => {
     </head>
     <body>
         <div class="container">
-            <h1>مراقبة حسابات روبلوكس متعددة</h1>
+            <h1>مراقبة حسابات روبلوكس متعددة (24/7)</h1>
             <h2>حالة اللاعبين الحالية</h2>
             ${currentHtml}
             <h2>سجل الجلسات السابقة</h2>
@@ -297,7 +305,7 @@ async function start() {
         console.log(`خادم الويب يعمل على المنفذ ${PORT}`);
     });
     checkPresence();
-    setInterval(checkPresence, 30000);
+    setInterval(checkPresence, 30000); // يفحص كل 30 ثانية
 }
 
 start();
