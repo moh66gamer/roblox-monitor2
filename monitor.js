@@ -234,7 +234,7 @@ const server = http.createServer(async (req, res) => {
 
         if (userData && userData.currentSession) {
             currentHtml += `<div style="background:#d4edda;padding:10px;border-radius:5px;margin-bottom:10px;border-right: 4px solid #28a745;">
-                <strong>${username}:</strong> يلعب الآن <b>${userData.currentSession.gameName}</b> (دخل: ${new Date(userData.currentSession.startTime).toLocaleString()})
+                <strong>${username}:</strong> يلعب الآن <b>${userData.currentSession.gameName}</b> (دخل: ${new Date(userData.currentSession.startTime).toLocaleString('en-US', { timeZone: 'Asia/Bahrain', hour12: true })})
             </div>`;
         } else {
             currentHtml += `<div style="background:#f8d7da;padding:10px;border-radius:5px;margin-bottom:10px;border-right: 4px solid #dc3545;">
@@ -247,7 +247,7 @@ const server = http.createServer(async (req, res) => {
                 historyRows += `<tr>
                     <td>${username}</td>
                     <td>${item.gameName}</td>
-                    <td dir="ltr">${new Date(item.startTime).toLocaleString()}</td>
+                    <td dir="ltr">${new Date(item.startTime).toLocaleString('en-US', { timeZone: 'Asia/Bahrain', hour12: true })}</td>
                     <td>${item.duration}</td>
                 </tr>`;
             });
